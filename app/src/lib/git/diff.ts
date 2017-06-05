@@ -10,8 +10,26 @@ import { DiffType, IRawDiff, IDiff, IImageDiff, Image } from '../../models/diff'
 
 import { DiffParser } from '../diff-parser'
 
-function wrapAndParseDiff(args: string[], path: string, successExitCodes?: Set<number>): Promise<IRawDiff> {
-  return new Promise<IRawDiff>((resolve, reject) => {
+// extracted this method becuase otherwise tslint freaks out about promise usage
+// wat
+function logResult(commandName: string, startTime: number | null) {
+  if (startTime) {
+    const rawTime = performance.now() - startTime
+    if (rawTime > 1000) {
+      const timeInSeconds = (rawTime / 1000).toFixed(3)
+      log.info(`Executing ${commandName} (took ${timeInSeconds}s)`)
+    }
+  }
+}
+
+function wrapAndParseDiff(args: string[], path: string, name: string, callback: (diff: IRawDiff) => Promise<IDiff>, successExitCodes?: Set<number>): Promise<IDiff> {
+
+  return new Promise<IDiff>((resolve, reject) => {
+    const commandName = `${name}: git ${args.join(' ')}`
+    log.debug(`Executing ${commandName}`)
+
+    const startTime = (performance && performance.now) ? performance.now() : null
+
     const process = spawn(args, path)
 
     const stdout = new Array<Buffer>()
@@ -25,6 +43,7 @@ function wrapAndParseDiff(args: string[], path: string, successExitCodes?: Set<n
     })
 
     process.on('exit', (code, signal) => {
+      logResult(commandName, startTime)
 
       if (successExitCodes && !successExitCodes.has(code)) {
         reject(new Error(`Git returned an unexpected exit code '${code}' which should be handled by the application'`))
@@ -34,11 +53,11 @@ function wrapAndParseDiff(args: string[], path: string, successExitCodes?: Set<n
       const maximumStringSize = 268435441
       const output = Buffer.concat(stdout)
       if (output.length >= maximumStringSize) {
-        reject(new Error(`Process output is greater than known V8 limit on string size: ${maximumStringSize} bytes`))
+        resolve({ kind: DiffType.TooLarge, length: output.length })
       } else {
         const diffRaw = output.toString('utf-8')
         const diffText = diffFromRawDiffOutput(diffRaw)
-        resolve(diffText)
+        callback(diffText).then(resolve).catch(reject)
       }
     })
   })
@@ -59,8 +78,7 @@ export function getCommitDiff(repository: Repository, file: FileChange, commitis
 
   const args = [ 'log', commitish, '-m', '-1', '--first-parent', '--patch-with-raw', '-z', '--no-color', '--binary', '--', file.path ]
 
-  return wrapAndParseDiff(args, repository.path)
-    .then(rawDiff => convertDiff(repository, file, rawDiff, commitish))
+  return wrapAndParseDiff(args, repository.path, 'getCommitDiff', rawDiff => convertDiff(repository, file, rawDiff, commitish))
 }
 
 /**
@@ -102,8 +120,7 @@ export function getWorkingDirectoryDiff(repository: Repository, file: WorkingDir
     args = [ 'diff', 'HEAD', '--no-ext-diff', '--patch-with-raw', '-z', '--no-color', '--binary', '--', file.path ]
   }
 
-  return wrapAndParseDiff(args, repository.path, successExitCodes)
-    .then(rawDiff => convertDiff(repository, file, rawDiff, 'HEAD'))
+  return wrapAndParseDiff(args, repository.path, 'getWorkingDirectoryDiff', rawDiff => convertDiff(repository, file, rawDiff, 'HEAD'), successExitCodes)
 }
 
 async function getImageDiff(repository: Repository, file: FileChange, commitish: string): Promise<IImageDiff> {
