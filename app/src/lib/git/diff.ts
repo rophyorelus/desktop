@@ -1,7 +1,7 @@
 import * as Path from 'path'
 import * as Fs from 'fs'
 
-import { git, IGitExecutionOptions } from './core'
+import { spawn } from './stream'
 import { getBlobContents } from './show'
 
 import { Repository } from '../../models/repository'
@@ -9,6 +9,40 @@ import { WorkingDirectoryFileChange, FileChange, FileStatus } from '../../models
 import { DiffType, IRawDiff, IDiff, IImageDiff, Image } from '../../models/diff'
 
 import { DiffParser } from '../diff-parser'
+
+function wrapAndParseDiff(args: string[], path: string, successExitCodes?: Set<number>): Promise<IRawDiff> {
+  return new Promise<IRawDiff>((resolve, reject) => {
+    const process = spawn(args, path)
+
+    const stdout = new Array<Buffer>()
+
+    process.stdout.on('data', (chunk) => {
+      if (chunk instanceof Buffer) {
+        stdout.push(chunk)
+      } else {
+        stdout.push(Buffer.from(chunk))
+      }
+    })
+
+    process.on('exit', (code, signal) => {
+
+      if (successExitCodes && !successExitCodes.has(code)) {
+        reject(new Error(`Git returned an unexpected exit code '${code}' which should be handled by the application'`))
+        return
+      }
+
+      const maximumStringSize = 268435441
+      const output = Buffer.concat(stdout)
+      if (output.length >= maximumStringSize) {
+        reject(new Error(`Process output is greater than known V8 limit on string size: ${maximumStringSize} bytes`))
+      } else {
+        const diffRaw = output.toString('utf-8')
+        const diffText = diffFromRawDiffOutput(diffRaw)
+        resolve(diffText)
+      }
+    })
+  })
+}
 
 /**
  *  Defining the list of known extensions we can render inside the app
@@ -23,11 +57,10 @@ const imageFileExtensions = new Set([ '.png', '.jpg', '.jpeg', '.gif' ])
  */
 export function getCommitDiff(repository: Repository, file: FileChange, commitish: string): Promise<IDiff> {
 
-  const args = [ 'log', commitish, '-m', '-1', '--first-parent', '--patch-with-raw', '-z', '--no-color', '--', file.path ]
+  const args = [ 'log', commitish, '-m', '-1', '--first-parent', '--patch-with-raw', '-z', '--no-color', '--binary', '--', file.path ]
 
-  return git(args, repository.path, 'getCommitDiff')
-    .then(value => diffFromRawDiffOutput(value.stdout))
-    .then(diff => convertDiff(repository, file, diff, commitish))
+  return wrapAndParseDiff(args, repository.path)
+    .then(rawDiff => convertDiff(repository, file, rawDiff, commitish))
 }
 
 /**
@@ -37,7 +70,7 @@ export function getCommitDiff(repository: Repository, file: FileChange, commitis
  */
 export function getWorkingDirectoryDiff(repository: Repository, file: WorkingDirectoryFileChange): Promise<IDiff> {
 
-  let opts: IGitExecutionOptions | undefined
+  let successExitCodes: Set<number> | undefined
   let args: Array<string>
 
   // `--no-ext-diff` should be provided wherever we invoke `git diff` so that any
@@ -54,8 +87,8 @@ export function getWorkingDirectoryDiff(repository: Repository, file: WorkingDir
     //
     // citation in source:
     // https://github.com/git/git/blob/1f66975deb8402131fbf7c14330d0c7cdebaeaa2/diff-no-index.c#L300
-    opts = { successExitCodes: new Set([ 0, 1 ]) }
-    args = [ 'diff', '--no-ext-diff', '--no-index', '--patch-with-raw', '-z', '--no-color', '--', '/dev/null', file.path ]
+    successExitCodes = new Set([ 0, 1 ])
+    args = [ 'diff', '--no-ext-diff', '--no-index', '--patch-with-raw', '-z', '--no-color', '--binary', '--', '/dev/null', file.path ]
   } else if (file.status === FileStatus.Renamed) {
     // NB: Technically this is incorrect, the best kind of incorrect.
     // In order to show exactly what will end up in the commit we should
@@ -64,14 +97,13 @@ export function getWorkingDirectoryDiff(repository: Repository, file: WorkingDir
     // already staged to the renamed file which differs from our other diffs.
     // The closest I got to that was running hash-object and then using
     // git diff <blob> <blob> but that seems a bit excessive.
-    args = [ 'diff', '--no-ext-diff', '--patch-with-raw', '-z', '--no-color', '--', file.path ]
+    args = [ 'diff', '--no-ext-diff', '--patch-with-raw', '-z', '--no-color', '--binary', '--', file.path ]
   } else {
-    args = [ 'diff', 'HEAD', '--no-ext-diff', '--patch-with-raw', '-z', '--no-color', '--', file.path ]
+    args = [ 'diff', 'HEAD', '--no-ext-diff', '--patch-with-raw', '-z', '--no-color', '--binary', '--', file.path ]
   }
 
-  return git(args, repository.path, 'getWorkingDirectoryDiff', opts)
-    .then(value => diffFromRawDiffOutput(value.stdout))
-    .then(diff => convertDiff(repository, file, diff, 'HEAD'))
+  return wrapAndParseDiff(args, repository.path, successExitCodes)
+    .then(rawDiff => convertDiff(repository, file, rawDiff, 'HEAD'))
 }
 
 async function getImageDiff(repository: Repository, file: FileChange, commitish: string): Promise<IImageDiff> {
