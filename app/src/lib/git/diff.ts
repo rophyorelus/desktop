@@ -53,6 +53,9 @@ function wrapAndParseDiff(args: string[], path: string, name: string, callback: 
       const maximumStringSize = 268435441
       const output = Buffer.concat(stdout)
       if (output.length >= maximumStringSize) {
+        // we know we can't transform this process output into a diff, so let's
+        // just return a placeholder for now that we can display to the user
+        // to say we're at the limits of the runtime
         resolve({ kind: DiffType.TooLarge, length: output.length })
       } else {
         const diffRaw = output.toString('utf-8')
@@ -75,9 +78,7 @@ const imageFileExtensions = new Set([ '.png', '.jpg', '.jpeg', '.gif' ])
  *                  to a commit.
  */
 export function getCommitDiff(repository: Repository, file: FileChange, commitish: string): Promise<IDiff> {
-
   const args = [ 'log', commitish, '-m', '-1', '--first-parent', '--patch-with-raw', '-z', '--no-color', '--binary', '--', file.path ]
-
   return wrapAndParseDiff(args, repository.path, 'getCommitDiff', rawDiff => convertDiff(repository, file, rawDiff, commitish))
 }
 
